@@ -6,7 +6,24 @@ use std::{
 };
 
 /// Bumped whenever the extraction logic changes so old cache files are ignored.
-const CACHE_VERSION: &str = "v2";
+const CACHE_VERSION: &str = "v3";
+
+/// Deterministic FNV-1a hash (unlike `DefaultHasher`, whose keys are random per run).
+/// Used for entry IDs and the icon cache so lookups are stable across launches.
+fn stable_hash(parts: &[&str]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for part in parts {
+        for &byte in part.as_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
 
 /// Loads native Windows shell icons lazily and caches them as egui textures.
 ///
@@ -96,20 +113,23 @@ impl IconCache {
     }
 
     fn cache_file(&self, path: &str, pixel_size: u32) -> PathBuf {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        CACHE_VERSION.hash(&mut hasher);
-        path.to_ascii_lowercase().hash(&mut hasher);
-        pixel_size.hash(&mut hasher);
+        let mut key = String::with_capacity(path.len() + 24);
+        key.push_str(CACHE_VERSION);
+        key.push('|');
+        key.push_str(&path.to_ascii_lowercase());
+        key.push('|');
+        key.push_str(&pixel_size.to_string());
         if let Ok(metadata) = fs::metadata(path) {
             if let Ok(modified) = metadata.modified() {
                 if let Ok(age) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    age.as_secs().hash(&mut hasher);
+                    key.push('|');
+                    key.push_str(&age.as_secs().to_string());
                 }
             }
         }
+        let hash = stable_hash(&[&key]);
         self.cache_dir
-            .join(format!("{CACHE_VERSION}-{:016x}.icon", hasher.finish()))
+            .join(format!("{CACHE_VERSION}-{hash:016x}.icon"))
     }
 }
 
@@ -138,7 +158,8 @@ struct IconSource {
 #[cfg(windows)]
 fn extract_rgba(path: &str, pixel_size: u32) -> Option<(u32, u32, Vec<u8>)> {
     if is_extension(Path::new(path), "lnk") || is_extension(Path::new(path), "url") {
-        return shortcut_icon(path, pixel_size);
+        let mut visited = HashSet::new();
+        return shortcut_icon(path, pixel_size, &mut visited, 0);
     }
 
     // Plain executables are read directly so every size stays sharp.
@@ -165,7 +186,20 @@ fn extract_rgba(path: &str, pixel_size: u32) -> Option<(u32, u32, Vec<u8>)> {
 ///    (web-app shortcuts point at a generic host executable), so ask the shell.
 /// 3. Otherwise read the target's embedded icon, then fall back to the shell.
 #[cfg(windows)]
-fn shortcut_icon(path: &str, pixel_size: u32) -> Option<(u32, u32, Vec<u8>)> {
+fn shortcut_icon(
+    path: &str,
+    pixel_size: u32,
+    visited: &mut HashSet<String>,
+    depth: usize,
+) -> Option<(u32, u32, Vec<u8>)> {
+    if depth > 8 {
+        return shell_type_icon(path, pixel_size);
+    }
+    let key = path.to_ascii_lowercase();
+    if !visited.insert(key) {
+        // Circular shortcut chain (A -> B -> A): bail out to the shell icon.
+        return shell_type_icon(path, pixel_size);
+    }
     if is_extension(Path::new(path), "url") {
         return internet_shortcut_icon(Path::new(path), pixel_size);
     }
@@ -186,7 +220,12 @@ fn shortcut_icon(path: &str, pixel_size: u32) -> Option<(u32, u32, Vec<u8>)> {
     if let Some(target) = target {
         if target.exists() {
             if is_extension(&target, "lnk") || is_extension(&target, "url") {
-                if let Some(image) = shortcut_icon(&target.to_string_lossy(), pixel_size) {
+                if let Some(image) = shortcut_icon(
+                    &target.to_string_lossy(),
+                    pixel_size,
+                    visited,
+                    depth + 1,
+                ) {
                     return Some(image);
                 }
             } else if let Some(image) = extract_from_file(&target, 0, pixel_size) {
@@ -474,6 +513,21 @@ fn shell_icon(path: &str, pixel_size: u32) -> Option<(u32, u32, Vec<u8>)> {
     }
 }
 
+/// Releases an `IUnknown`-derived COM pointer obtained as a raw pointer.
+#[cfg(windows)]
+unsafe fn release_com(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    let vtable = *(ptr as *const *const usize);
+    if vtable.is_null() {
+        return;
+    }
+    let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+        std::mem::transmute(*vtable.add(2));
+    release(ptr);
+}
+
 /// Extracts one image from a shell system image list as an `HICON`.
 #[cfg(windows)]
 unsafe fn image_list_icon(
@@ -494,6 +548,7 @@ unsafe fn image_list_icon(
         return None;
     }
     let hicon = ImageList_GetIcon(raw as _, index, ILD_TRANSPARENT);
+    release_com(raw);
     if hicon.is_null() {
         return None;
     }

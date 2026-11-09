@@ -81,26 +81,61 @@ fn read_json(path: PathBuf) -> Option<String> {
 }
 
 pub fn load_entries(dir: &Path) -> Vec<AppEntry> {
-    read_json(dir.join("apps.json"))
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-pub fn save_entries(dir: &Path, entries: &[AppEntry]) -> Result<(), String> {
     let path = dir.join("apps.json");
-    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    let Some(text) = read_json(path.clone()) else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(entries) => entries,
+        Err(_) => {
+            backup_corrupt(&path, dir, "apps.json.bak");
+            Vec::new()
+        }
+    }
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
-    read_json(dir.join("settings.json"))
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let path = dir.join("settings.json");
+    let Some(text) = read_json(path.clone()) else {
+        return Settings::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(settings) => settings,
+        Err(_) => {
+            backup_corrupt(&path, dir, "settings.json.bak");
+            Settings::default()
+        }
+    }
+}
+
+/// Preserves a corrupt JSON file for manual recovery instead of silently
+/// overwriting it on the next save.
+fn backup_corrupt(path: &Path, dir: &Path, file_name: &str) {
+    let backup = dir.join(file_name);
+    if backup.exists() {
+        return;
+    }
+    let _ = fs::copy(path, backup);
+}
+
+fn write_atomic(path: &Path, json: &str) -> Result<(), String> {
+    let dir = path.parent().ok_or_else(|| "no parent directory".to_string())?;
+    let tmp = dir.join(format!(".{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+    fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+pub fn save_entries(dir: &Path, entries: &[AppEntry]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join("apps.json"), &json)
 }
 
 pub fn save_settings(dir: &Path, settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(dir.join("settings.json"), json).map_err(|e| e.to_string())
+    write_atomic(&dir.join("settings.json"), &json)
 }
 
 /// Moves the selected entries into `group`. Returns how many entries were assigned.
@@ -131,16 +166,26 @@ pub fn make_entry(path: &Path, source: EntrySource) -> Option<AppEntry> {
     }
     let name = path.file_stem()?.to_string_lossy().to_string();
     let key = path.to_string_lossy().to_ascii_lowercase();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    use std::hash::{Hash, Hasher};
-    key.hash(&mut hasher);
+    let id = stable_entry_id(&key);
     Some(AppEntry {
-        id: format!("{:016x}", hasher.finish()),
+        id: format!("{id:016x}"),
         name,
         path: path.to_string_lossy().to_string(),
         group: String::new(),
         source,
     })
+}
+
+/// Stable FNV-1a so the same path always produces the same ID across runs.
+fn stable_entry_id(key: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for &byte in key.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -227,5 +272,54 @@ mod tests {
         // An empty group name is ignored instead of wiping existing groups.
         assert_eq!(assign_entries_to_group(&mut entries, &members, "   "), 0);
         assert_eq!(entries[0].group, "Office");
+    }
+
+    #[test]
+    fn corrupt_json_is_backed_up_not_silently_lost() {
+        let dir = std::env::temp_dir().join(format!(
+            "launcher95-test-corrupt-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("apps.json"), "{[not json").unwrap();
+        std::fs::write(dir.join("settings.json"), "{{\"bad\"").unwrap();
+
+        assert!(load_entries(&dir).is_empty());
+        assert!(dir.join("apps.json.bak").exists());
+        let _ = load_settings(&dir);
+        assert!(dir.join("settings.json.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "launcher95-test-atomic-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let entries = vec![AppEntry {
+            id: "a".into(),
+            name: "A".into(),
+            path: "C:/a.exe".into(),
+            group: String::new(),
+            source: EntrySource::Manual,
+        }];
+        save_entries(&dir, &entries).unwrap();
+        assert_eq!(load_entries(&dir), entries);
+        // No temp files left behind.
+        for name in std::fs::read_dir(&dir).unwrap().flatten() {
+            assert!(
+                !name.file_name().to_string_lossy().ends_with(".tmp"),
+                "temp file leaked: {:?}",
+                name.path()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

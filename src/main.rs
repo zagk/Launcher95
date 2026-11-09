@@ -52,7 +52,7 @@ fn cursor_anchored_position(width: f32, height: f32) -> Option<[f32; 2]> {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     unsafe {
@@ -61,10 +61,13 @@ fn cursor_anchored_position(width: f32, height: f32) -> Option<[f32; 2]> {
             return None;
         }
 
-        let dpi = GetDpiForSystem();
-        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
-
         let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        let hr = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        let dpi = if hr >= 0 && dpi_x != 0 { dpi_x } else { 96 };
+        let scale = dpi as f32 / 96.0;
+
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(monitor, &mut info) == 0 {

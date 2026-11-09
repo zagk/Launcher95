@@ -23,9 +23,13 @@ global shortcut) away.
   URL files onto the window.
 - **Search** by name or path in a dedicated Find window (`Ctrl+F` or File > Find
   program), with live match counts; press Enter to launch the first match.
-- **Groups**: drag one tile onto another to put both into a named group. You can also
-  use Edit > New group…, or right-click a tile and choose Add to group > New group…
-  to pick any set of programs at once. Filter the grid by group from View > Group;
+- **Groups**: drag one tile onto another. Dropping onto a tile that already belongs
+  to a group adds the dragged tile to that group; dropping onto an ungrouped tile
+  opens New group… with both tiles pre-selected so you choose the name (it never
+  silently merges with an unrelated group of the same name). You can also use
+  Edit > New group…, or right-click a tile and choose Add to group > New group…
+  to pick any set of programs at once. Group names are case-normalized, so
+  "Office" and "office" stay one group. Filter the grid by group from View > Group;
   the status bar shows the active group.
 - **Rename / remove** entries, or reveal them in Explorer. Removing never deletes
   the original file.
@@ -48,6 +52,10 @@ global shortcut) away.
 - **Portable data**: everything lives in a `Data` folder next to the executable.
   If that folder is not writable (e.g. Program Files), it falls back to
   `%LOCALAPPDATA%\Launcher95`.
+- **Resilient data files**: settings and entries are written atomically
+  (temp file + rename), so a crash cannot truncate them. If a JSON file is
+  corrupt, the original bytes are preserved as `Data/*.bak` before defaults are
+  used, instead of being silently overwritten.
 
 ## Keyboard and mouse
 
@@ -59,6 +67,7 @@ global shortcut) away.
 | Launch first search match | `Enter` in the Find window |
 | Clear search / close dialog | `Esc` |
 | Launch an app | Click a tile |
+| Select without launching (rename/delete) | `Ctrl+Click` a tile, or right-click it |
 | Tile context menu | Right-click a tile |
 | Put two apps in a group | Drag one tile onto another |
 | Create a group of several apps | Edit > New group…, or tile menu > Add to group |
@@ -95,6 +104,7 @@ The icon and version resources are compiled in by `build.rs` from
 - `Data/apps.json` – registered entries (`id`, `name`, `path`, `group`, `source`)
 - `Data/settings.json` – window geometry, icon size, hotkey and toggles
 - `Data/icons/` – extracted icon cache (safe to delete; it is rebuilt)
+- `Data/*.bak` – automatic backup created when a JSON file fails to parse
 
 Both JSON files are plain, human-editable UTF-8. A UTF-8 BOM is tolerated on load.
 
@@ -102,7 +112,9 @@ Both JSON files are plain, human-editable UTF-8. A UTF-8 BOM is tolerated on loa
 
 - Global hotkey registration depends on Windows accepting the key combination.
   If another application already owns it, registration fails and the status bar
-  reports the error — pick a different combination in Settings.
+  reports the error — pick a different combination in Settings. A failed or
+  invalid shortcut also deactivates the previous one rather than leaving the
+  old combination active.
 - Shortcuts whose target no longer exists fall back to the shell's shortcut icon;
   use Edit > Remove missing files to clean them up.
 - The UI text is English; Korean shortcut names render correctly through a
