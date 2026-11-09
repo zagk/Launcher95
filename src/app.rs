@@ -635,21 +635,21 @@ impl Launcher95App {
         ui.horizontal(|ui| {
             if !exe_path.is_empty() {
                 if let Some(texture) = self.icons.texture(ui.ctx(), &exe_path, 32) {
-                    ui.add(egui::Image::new((texture.id(), egui::vec2(16.0, 16.0))));
+                    ui.add(egui::Image::new((texture.id(), egui::vec2(20.0, 20.0))));
                 } else {
-                    ui.add_space(16.0);
+                    ui.add_space(20.0);
                 }
             }
 
-            let buttons_width = 3.0 * 19.0;
+            let buttons_width = 3.0 * 23.0;
             let title_width = (ui.available_width() - buttons_width - 4.0).max(40.0);
             let (title_rect, title) =
-                ui.allocate_exact_size(egui::vec2(title_width, 16.0), Sense::click_and_drag());
+                ui.allocate_exact_size(egui::vec2(title_width, 20.0), Sense::click_and_drag());
             ui.painter().text(
                 egui::pos2(title_rect.left() + 5.0, title_rect.center().y),
                 Align2::LEFT_CENTER,
                 "Launcher95",
-                FontId::proportional(12.5),
+                FontId::proportional(13.5),
                 Color32::WHITE,
             );
             if title.drag_started() {
@@ -696,6 +696,29 @@ impl Launcher95App {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let mut action = None;
         let mut dirty = false;
+
+        // Flat Win95 menu text: no button box behind the labels.
+        {
+            let style = ui.style_mut();
+            style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            style.visuals.widgets.inactive.bg_stroke = Stroke::new(0.0_f32, Color32::TRANSPARENT);
+            style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            style.visuals.widgets.inactive.corner_radius = CornerRadius::ZERO;
+            style.visuals.widgets.hovered.bg_fill = theme::WIN95_LIGHT;
+            style.visuals.widgets.hovered.bg_stroke = Stroke::new(0.0_f32, Color32::TRANSPARENT);
+            style.visuals.widgets.hovered.weak_bg_fill = theme::WIN95_LIGHT;
+            style.visuals.widgets.hovered.corner_radius = CornerRadius::ZERO;
+            style.visuals.widgets.open.bg_fill = theme::WIN95_LIGHT;
+            style.visuals.widgets.open.bg_stroke = Stroke::new(0.0_f32, Color32::TRANSPARENT);
+            style.visuals.widgets.open.weak_bg_fill = theme::WIN95_LIGHT;
+            style.visuals.widgets.open.corner_radius = CornerRadius::ZERO;
+            style.visuals.widgets.active.bg_fill = theme::WIN95;
+            style.visuals.widgets.active.bg_stroke = Stroke::new(0.0_f32, Color32::TRANSPARENT);
+            style.visuals.widgets.noninteractive.bg_stroke =
+                Stroke::new(0.0_f32, Color32::TRANSPARENT);
+            style.spacing.button_padding = egui::vec2(5.0, 2.0);
+            style.spacing.item_spacing = egui::vec2(2.0, 0.0);
+        }
 
         ui.horizontal(|ui| {
             ui.menu_button("File", |ui| {
@@ -880,6 +903,20 @@ impl Launcher95App {
     fn status_bar(&mut self, ui: &mut egui::Ui, shown: usize) {
         let count = self.entries.len();
         let rect = ui.max_rect();
+        let ctx = ui.ctx().clone();
+        let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+        let grip_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 18.0, rect.bottom() - 18.0),
+            egui::vec2(18.0, 18.0),
+        );
+        let resize = if maximized {
+            ui.allocate_rect(grip_rect, Sense::hover())
+        } else {
+            ui.allocate_rect(grip_rect, Sense::drag())
+        };
+        if resize.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        }
         let painter = ui.painter();
         let text_color = theme::INK;
         let font = FontId::proportional(11.0);
@@ -900,7 +937,7 @@ impl Launcher95App {
             text_color,
         );
         painter.text(
-            egui::pos2(rect.right() - 20.0, rect.center().y),
+            egui::pos2(rect.right() - 24.0, rect.center().y),
             Align2::RIGHT_CENTER,
             truncate(&self.status, 60),
             font,
@@ -908,6 +945,17 @@ impl Launcher95App {
         );
 
         draw_size_grip(painter, rect);
+
+        if !maximized && resize.dragged() {
+            if let Some(pointer) = ctx.pointer_interact_pos() {
+                let origin = ctx.screen_rect().min;
+                let size = egui::vec2(
+                    (pointer.x - origin.x).max(460.0),
+                    (pointer.y - origin.y).max(340.0),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
     }
 
     fn filtered_entries(&self) -> Vec<AppEntry> {
@@ -940,7 +988,7 @@ impl Launcher95App {
 
     fn content(&mut self, ui: &mut egui::Ui, visible: &[AppEntry]) {
         let full = ui.max_rect();
-        let side = (full.width() * 0.042).clamp(6.0, 34.0);
+        let side = 10.0;
         let panel = full.shrink2(egui::vec2(side, 1.0));
 
         // The icon area is a flat white panel with a one-pixel shadow outline,
@@ -1712,11 +1760,11 @@ impl eframe::App for Launcher95App {
         let visible_count = visible.len();
 
         egui::TopBottomPanel::top("titlebar")
-            .exact_height(22.0)
+            .exact_height(30.0)
             .frame(
                 Frame::new()
                     .fill(theme::NAVY)
-                    .inner_margin(Margin::symmetric(2, 2)),
+                    .inner_margin(Margin::symmetric(3, 2)),
             )
             .show(ctx, |ui| self.title_bar(ui, ctx));
 
@@ -1795,7 +1843,7 @@ impl eframe::App for Launcher95App {
 }
 
 fn title_button(ui: &mut egui::Ui, kind: TitleButton) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 16.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), Sense::click());
     let pressed = response.is_pointer_button_down_on();
     let painter = ui.painter();
     painter.rect_filled(

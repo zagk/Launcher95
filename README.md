@@ -74,6 +74,7 @@ global shortcut) away.
 | Filter by group | View > Group |
 | Open at the mouse pointer | Enabled by default; toggle in Settings |
 | Move window | Drag the title bar |
+| Resize window | Drag the bottom-right grip |
 | Maximize / restore | Double-click the title bar, or the middle title button |
 | Minimize | Click outside the window, or the left title button |
 
