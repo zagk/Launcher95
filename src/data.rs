@@ -32,6 +32,7 @@ pub struct Settings {
     pub sort_by_name: bool,
     pub always_on_top: bool,
     pub minimize_on_blur: bool,
+    pub open_at_mouse: bool,
     pub remember_window_position: bool,
     pub window_x: Option<f32>,
     pub window_y: Option<f32>,
@@ -43,11 +44,12 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey: "Alt+Space".to_owned(),
-            icon_size: 48.0,
+            icon_size: 40.0,
             show_names: true,
             sort_by_name: true,
             always_on_top: false,
             minimize_on_blur: true,
+            open_at_mouse: true,
             remember_window_position: true,
             window_x: None,
             window_y: None,
@@ -101,6 +103,26 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> Result<(), String> {
     fs::write(dir.join("settings.json"), json).map_err(|e| e.to_string())
 }
 
+/// Moves the selected entries into `group`. Returns how many entries were assigned.
+pub fn assign_entries_to_group(
+    entries: &mut [AppEntry],
+    members: &std::collections::HashSet<String>,
+    group: &str,
+) -> usize {
+    let group = group.trim();
+    if group.is_empty() {
+        return 0;
+    }
+    let mut assigned = 0usize;
+    for entry in entries.iter_mut() {
+        if members.contains(&entry.id) {
+            entry.group = group.to_owned();
+            assigned += 1;
+        }
+    }
+    assigned
+}
+
 pub fn make_entry(path: &Path, source: EntrySource) -> Option<AppEntry> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
@@ -149,9 +171,10 @@ mod tests {
     fn settings_fill_in_missing_fields() {
         let settings: Settings = serde_json::from_str(r#"{"hotkey":"Ctrl+Q"}"#).unwrap();
         assert_eq!(settings.hotkey, "Ctrl+Q");
-        assert_eq!(settings.icon_size, 48.0);
+        assert_eq!(settings.icon_size, 40.0);
         assert!(settings.show_names);
         assert!(settings.sort_by_name);
+        assert!(settings.open_at_mouse);
     }
 
     #[test]
@@ -165,5 +188,44 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.hotkey, "Ctrl+Alt+L");
         assert_eq!(restored.icon_size, 64.0);
+    }
+
+    #[test]
+    fn assigns_only_selected_entries_to_a_group() {
+        let mut entries = vec![
+            AppEntry {
+                id: "a".into(),
+                name: "A".into(),
+                path: "C:/a.exe".into(),
+                group: String::new(),
+                source: EntrySource::Manual,
+            },
+            AppEntry {
+                id: "b".into(),
+                name: "B".into(),
+                path: "C:/b.exe".into(),
+                group: "Old".into(),
+                source: EntrySource::Manual,
+            },
+            AppEntry {
+                id: "c".into(),
+                name: "C".into(),
+                path: "C:/c.exe".into(),
+                group: String::new(),
+                source: EntrySource::Manual,
+            },
+        ];
+        let members: std::collections::HashSet<String> =
+            ["a".to_string(), "c".to_string()].into_iter().collect();
+
+        let assigned = assign_entries_to_group(&mut entries, &members, "  Office  ");
+        assert_eq!(assigned, 2);
+        assert_eq!(entries[0].group, "Office");
+        assert_eq!(entries[1].group, "Old");
+        assert_eq!(entries[2].group, "Office");
+
+        // An empty group name is ignored instead of wiping existing groups.
+        assert_eq!(assign_entries_to_group(&mut entries, &members, "   "), 0);
+        assert_eq!(entries[0].group, "Office");
     }
 }

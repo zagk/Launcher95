@@ -1,17 +1,18 @@
 use crate::{
     data::{
-        load_entries, load_settings, make_entry, save_entries, save_settings, AppEntry,
-        EntrySource, Settings,
+        assign_entries_to_group, load_entries, load_settings, make_entry, save_entries,
+        save_settings, AppEntry, EntrySource, Settings,
     },
     icons::IconCache,
     theme,
 };
 use eframe::egui::{
-    self, Align, Align2, Color32, ComboBox, CornerRadius, FontId, Frame, Key, Layout, Margin,
-    RichText, Sense, Stroke,
+    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin, RichText,
+    Sense, Stroke,
 };
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -35,6 +36,8 @@ enum TitleButton {
 #[derive(Clone, Copy)]
 enum MenuAction {
     Add,
+    NewGroup,
+    Find,
     Exit,
     Rename,
     Delete,
@@ -54,6 +57,11 @@ pub struct Launcher95App {
     status: String,
     show_settings: bool,
     show_about: bool,
+    show_search: bool,
+    show_group_dialog: bool,
+    group_name: String,
+    group_members: HashSet<String>,
+    focus_group_name: bool,
     hotkey_text: String,
     hotkey_manager: Option<GlobalHotKeyManager>,
     hotkey: Option<HotKey>,
@@ -80,14 +88,20 @@ pub struct Launcher95App {
 
 impl Launcher95App {
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
-        theme::apply(&cc.egui_ctx);
+        let mut app = Self::new_with_context(&cc.egui_ctx, data_dir);
+        app.register_hotkey();
+        app
+    }
+
+    fn new_with_context(ctx: &egui::Context, data_dir: PathBuf) -> Self {
+        theme::apply(ctx);
         let settings = load_settings(&data_dir);
         let entries = load_entries(&data_dir);
         let exe_path = std::env::current_exe()
             .ok()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default();
-        let mut app = Self {
+        let app = Self {
             icons: IconCache::new(&data_dir),
             hotkey_text: settings.hotkey.clone(),
             settings,
@@ -97,6 +111,11 @@ impl Launcher95App {
             status: "Ready".into(),
             show_settings: false,
             show_about: false,
+            show_search: false,
+            show_group_dialog: false,
+            group_name: String::new(),
+            group_members: HashSet::new(),
+            focus_group_name: false,
             hotkey_manager: GlobalHotKeyManager::new().ok(),
             hotkey: None,
             hotkey_listener_started: false,
@@ -119,7 +138,6 @@ impl Launcher95App {
             exe_path,
             entries,
         };
-        app.register_hotkey();
         app
     }
 
@@ -319,6 +337,43 @@ impl Launcher95App {
         self.status = format!("Group created: {group}");
     }
 
+    fn begin_group(&mut self, seed: Option<&str>) {
+        self.group_name.clear();
+        self.group_members.clear();
+        if let Some(id) = seed {
+            self.group_members.insert(id.to_owned());
+        }
+        self.focus_group_name = true;
+        self.show_group_dialog = true;
+    }
+
+    fn create_group(&mut self) {
+        let name = self.group_name.trim().to_owned();
+        if name.is_empty() {
+            self.status = "Group name is empty".into();
+            return;
+        }
+        if self.group_members.is_empty() {
+            self.status = "Select at least one program".into();
+            return;
+        }
+
+        let members = self.group_members.clone();
+        let moved = assign_entries_to_group(&mut self.entries, &members, &name);
+        if moved == 0 {
+            self.status = "Select at least one program".into();
+            return;
+        }
+
+        self.group_filter = name.clone();
+        self.persist_entries();
+        self.show_group_dialog = false;
+        self.status = format!(
+            "Group '{name}' has {moved} program{}",
+            plural(moved)
+        );
+    }
+
     fn register_hotkey(&mut self) {
         if let (Some(manager), Some(old)) = (&self.hotkey_manager, self.hotkey.take()) {
             let _ = manager.unregister(old);
@@ -332,7 +387,9 @@ impl Launcher95App {
                 Ok(()) => {
                     self.hotkey = Some(key);
                     self.hotkey_id.store(key.id(), Ordering::Relaxed);
-                    self.status = format!("Shortcut registered: {}", self.settings.hotkey);
+                    if self.status.starts_with("Shortcut") {
+                        self.status = "Ready".into();
+                    }
                 }
                 Err(error) => self.status = format!("Shortcut registration failed: {error}"),
             }
@@ -379,6 +436,7 @@ impl Launcher95App {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::F)) {
+            self.show_search = true;
             self.focus_search = true;
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::O)) {
@@ -390,6 +448,7 @@ impl Launcher95App {
             } else {
                 self.show_settings = false;
                 self.show_about = false;
+                self.show_search = false;
                 self.edit_id = None;
             }
         }
@@ -618,6 +677,10 @@ impl Launcher95App {
                     action = Some(MenuAction::Add);
                     ui.close_menu();
                 }
+                if ui.button("Find program...").clicked() {
+                    action = Some(MenuAction::Find);
+                    ui.close_menu();
+                }
                 ui.separator();
                 if ui.button("Exit").clicked() {
                     action = Some(MenuAction::Exit);
@@ -626,6 +689,11 @@ impl Launcher95App {
             });
 
             ui.menu_button("Edit", |ui| {
+                if ui.button("New group...").clicked() {
+                    action = Some(MenuAction::NewGroup);
+                    ui.close_menu();
+                }
+                ui.separator();
                 let has_selection = self.selected_id.is_some();
                 ui.add_enabled_ui(has_selection, |ui| {
                     if ui.button("Rename selected...").clicked() {
@@ -649,9 +717,31 @@ impl Launcher95App {
             });
 
             ui.menu_button("View", |ui| {
+                let groups = self.groups();
+                ui.menu_button("Group", |ui| {
+                    if ui
+                        .selectable_label(self.group_filter.is_empty(), "All programs")
+                        .clicked()
+                    {
+                        self.group_filter.clear();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    for value in &groups {
+                        let current = self.group_filter == *value;
+                        if ui.selectable_label(current, value.as_str()).clicked() {
+                            self.group_filter = value.clone();
+                            ui.close_menu();
+                        }
+                    }
+                    if groups.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("(no groups)"));
+                    }
+                });
                 ui.menu_button("Icon size", |ui| {
                     for (size, label) in [
                         (32.0, "Small (32)"),
+                        (40.0, "Normal (40)"),
                         (48.0, "Medium (48)"),
                         (64.0, "Large (64)"),
                         (96.0, "Extra large (96)"),
@@ -683,6 +773,15 @@ impl Launcher95App {
                     .checkbox(
                         &mut self.settings.minimize_on_blur,
                         "Minimize when clicking outside",
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut self.settings.open_at_mouse,
+                        "Open at the mouse pointer",
                     )
                     .changed()
                 {
@@ -725,6 +824,14 @@ impl Launcher95App {
 
         match action {
             Some(MenuAction::Add) => self.add_dialog(),
+            Some(MenuAction::Find) => {
+                self.show_search = true;
+                self.focus_search = true;
+            }
+            Some(MenuAction::NewGroup) => {
+                let seed = self.selected_id.clone();
+                self.begin_group(seed.as_deref());
+            }
             Some(MenuAction::Exit) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
             Some(MenuAction::Rename) => self.begin_rename(),
             Some(MenuAction::Delete) => {
@@ -745,86 +852,37 @@ impl Launcher95App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let count = self.entries.len();
-            ui.label(RichText::new(format!("{count} program{}", plural(count))).size(10.0));
-            ui.separator();
-            ui.label(
-                RichText::new(format!("Hotkey: {}", self.settings.hotkey))
-                    .size(10.0)
-                    .color(Color32::from_gray(80)),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(&self.status).size(10.0));
-            });
-        });
-    }
+        let count = self.entries.len();
+        let rect = ui.max_rect();
+        let painter = ui.painter();
+        let text_color = theme::INK;
+        let font = FontId::proportional(11.0);
 
-    fn content(&mut self, ui: &mut egui::Ui) {
-        let mut launch_first = false;
-        self.toolbar(ui, &mut launch_first);
-        ui.add_space(4.0);
-        ui.separator();
-        let visible = self.filtered_entries();
-        if launch_first {
-            if let Some(entry) = visible.first().cloned() {
-                self.launch_entry(&entry);
-            }
+        // Flat Win95 status bar: count on the left, state on the right.
+        let mut left = format!("{count} Program{}", plural(count));
+        let shown = self.filtered_entries().len();
+        if shown != count {
+            left.push_str(&format!(" ({shown} shown)"));
         }
-        self.grid(ui, &visible);
-    }
-
-    fn toolbar(&mut self, ui: &mut egui::Ui, launch_first: &mut bool) {
-        let groups = self.groups();
-        let mut group = self.group_filter.clone();
-        let mut add = false;
-
-        ui.horizontal(|ui| {
-            ui.label("Search:");
-            let search = ui.add_sized(
-                [190.0, 20.0],
-                egui::TextEdit::singleline(&mut self.search).hint_text("Search programs..."),
-            );
-            if self.focus_search {
-                search.request_focus();
-                self.focus_search = false;
-            }
-            if search.has_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
-                *launch_first = true;
-            }
-            if ui.button("Clear").clicked() {
-                self.search.clear();
-            }
-
-            ui.separator();
-            ui.label("Group:");
-            ComboBox::from_id_salt("group_filter")
-                .width(118.0)
-                .selected_text(if group.is_empty() {
-                    "All apps"
-                } else {
-                    group.as_str()
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut group, String::new(), "All apps");
-                    for value in &groups {
-                        ui.selectable_value(&mut group, value.clone(), value);
-                    }
-                });
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("+ Add").clicked() {
-                    add = true;
-                }
-            });
-        });
-
-        if group != self.group_filter {
-            self.group_filter = group;
+        if !self.group_filter.is_empty() {
+            left.push_str(&format!(" - Group: {}", self.group_filter));
         }
-        if add {
-            self.add_dialog();
-        }
+        painter.text(
+            egui::pos2(rect.left() + 6.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            left,
+            font.clone(),
+            text_color,
+        );
+        painter.text(
+            egui::pos2(rect.right() - 20.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            truncate(&self.status, 60),
+            font,
+            text_color,
+        );
+
+        draw_size_grip(painter, rect);
     }
 
     fn filtered_entries(&self) -> Vec<AppEntry> {
@@ -853,6 +911,33 @@ impl Launcher95App {
             visible.sort_by_key(|entry| entry.name.to_ascii_lowercase());
         }
         visible
+    }
+
+    fn content(&mut self, ui: &mut egui::Ui) {
+        let visible = self.filtered_entries();
+        let full = ui.max_rect();
+        let side = (full.width() * 0.042).clamp(6.0, 34.0);
+        let panel = full.shrink2(egui::vec2(side, 1.0));
+
+        // The icon area is a flat white panel with a one-pixel shadow outline,
+        // flush between the menu bar and the status bar.
+        let painter = ui.painter();
+        painter.rect_filled(full, CornerRadius::ZERO, theme::WIN95);
+        painter.rect_filled(panel, CornerRadius::ZERO, Color32::WHITE);
+        painter.rect_stroke(
+            panel.shrink(0.5),
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, theme::WIN95_SHADOW),
+            egui::StrokeKind::Inside,
+        );
+
+        let inner = panel.shrink2(egui::vec2(4.0, 6.0));
+        let mut grid_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        self.grid(&mut grid_ui, &visible);
     }
 
     fn grid(&mut self, ui: &mut egui::Ui, visible: &[AppEntry]) {
@@ -885,15 +970,30 @@ impl Launcher95App {
             return;
         }
 
+        let icon_size = self.settings.icon_size.clamp(24.0, 128.0);
+        let label_height = if self.settings.show_names { 16.0 } else { 0.0 };
+        let cell_height = icon_size + label_height + 3.0;
+
+        // Equal-width columns centred in the panel, as in the mockup.
+        let width = ui.available_width();
+        let (columns, cell_width) = grid_columns(width, icon_size);
+        let row_width = cell_width * columns as f32;
+        let row_left = ui.max_rect().center().x - row_width * 0.5;
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                    for entry in visible {
-                        self.draw_tile(ui, entry);
-                    }
-                });
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
+                for row in visible.chunks(columns) {
+                    let left_pad = (row_left - ui.max_rect().left()).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        ui.add_space(left_pad);
+                        for entry in row {
+                            self.draw_tile(ui, entry, cell_width, cell_height);
+                        }
+                    });
+                }
             });
 
         if let Some(source) = self.dragging_id.clone() {
@@ -917,14 +1017,20 @@ impl Launcher95App {
         }
     }
 
-    fn draw_tile(&mut self, ui: &mut egui::Ui, entry: &AppEntry) {
+    fn draw_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        entry: &AppEntry,
+        tile_width: f32,
+        tile_height: f32,
+    ) {
         let icon_size = self.settings.icon_size.clamp(24.0, 128.0);
         let show_names = self.settings.show_names;
-        let tile_width = icon_size + 24.0;
-        let tile_height = icon_size + if show_names { 40.0 } else { 12.0 };
 
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(tile_width, tile_height), Sense::click_and_drag());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(tile_width, tile_height),
+            Sense::click_and_drag(),
+        );
         self.tile_rects.push((entry.id.clone(), rect));
 
         let hovered = response.hovered();
@@ -961,10 +1067,23 @@ impl Launcher95App {
             _ => Color32::from_rgb(128, 64, 0),
         };
 
+        let label_size = 11.5;
+        let label_top = icon_rect.bottom() + 4.0;
+        let label_band = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 3.0, icon_rect.top() - 4.0),
+            egui::pos2(rect.right() - 3.0, label_top + label_size + 4.0),
+        );
+
         {
             let painter = ui.painter();
+            // Classic behaviour: hovering tints the cell, selecting darkens it.
             if highlighted {
-                painter.rect_filled(rect, CornerRadius::ZERO, theme::NAVY);
+                let fill = if selected || drop_target {
+                    theme::NAVY
+                } else {
+                    theme::WIN95_LIGHT
+                };
+                painter.rect_filled(label_band, CornerRadius::ZERO, fill);
             }
             if drop_target {
                 painter.rect_stroke(
@@ -996,25 +1115,30 @@ impl Launcher95App {
             }
 
             if show_names {
-                let color = if highlighted {
+                let color = if selected || drop_target {
                     Color32::WHITE
                 } else {
                     theme::INK
                 };
-                let label = truncate(&entry.name, 30);
+                let max_chars = (((tile_width - 8.0) / 6.2) as usize).max(4);
+                let label = truncate(&entry.name, max_chars);
                 let mut job = egui::text::LayoutJob::simple(
                     label,
-                    FontId::proportional(10.0),
+                    FontId::proportional(label_size),
                     color,
-                    tile_width - 6.0,
+                    tile_width - 8.0,
                 );
-                job.wrap.max_rows = 2;
+                job.wrap.max_rows = 1;
                 let galley = painter.layout_job(job);
                 let position = egui::pos2(
                     rect.center().x - galley.size().x * 0.5,
-                    rect.bottom() - 3.0 - galley.size().y,
+                    label_top,
                 );
                 painter.galley(position, galley, color);
+            }
+
+            if selected {
+                dotted_rect(painter, label_band.shrink(1.0));
             }
         }
 
@@ -1034,6 +1158,9 @@ impl Launcher95App {
         let name = entry.name.clone();
         let path = entry.path.clone();
         let group = entry.group.clone();
+        let all_groups = self.groups();
+        let mut assign_to: Option<String> = None;
+        let mut new_group = false;
         response.context_menu(|ui| {
             if ui.button("Run").clicked() {
                 self.launch_entry(entry);
@@ -1049,6 +1176,22 @@ impl Launcher95App {
                 self.focus_rename = true;
                 ui.close_menu();
             }
+            ui.menu_button("Add to group", |ui| {
+                for value in &all_groups {
+                    let current = value == &group;
+                    if ui.selectable_label(current, value.as_str()).clicked() {
+                        assign_to = Some(value.clone());
+                        ui.close_menu();
+                    }
+                }
+                if !all_groups.is_empty() {
+                    ui.separator();
+                }
+                if ui.button("New group...").clicked() {
+                    new_group = true;
+                    ui.close_menu();
+                }
+            });
             if !group.is_empty() && ui.button("Remove from group").clicked() {
                 if let Some(item) = self.entries.iter_mut().find(|item| item.id == id) {
                     item.group.clear();
@@ -1062,6 +1205,18 @@ impl Launcher95App {
                 ui.close_menu();
             }
         });
+
+        if let Some(target) = assign_to {
+            if let Some(item) = self.entries.iter_mut().find(|item| item.id == id) {
+                item.group = target.clone();
+            }
+            self.group_filter.clear();
+            self.persist_entries();
+            self.status = format!("Added to group: {target}");
+        }
+        if new_group {
+            self.begin_group(Some(&id));
+        }
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1081,6 +1236,7 @@ impl Launcher95App {
                     ui.label("Icon size:");
                     for (size, label) in [
                         (32.0, "32"),
+                        (40.0, "40"),
                         (48.0, "48"),
                         (64.0, "64"),
                         (96.0, "96"),
@@ -1116,6 +1272,15 @@ impl Launcher95App {
                     .checkbox(
                         &mut self.settings.minimize_on_blur,
                         "Minimize when clicking outside",
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut self.settings.open_at_mouse,
+                        "Open at the mouse pointer",
                     )
                     .changed()
                 {
@@ -1196,13 +1361,15 @@ impl Launcher95App {
             .resizable(false)
             .default_width(360.0)
             .show(ctx, |ui| {
-                ui.heading("Launcher95 0.3");
+                ui.heading("Launcher95 0.4");
                 ui.label("A portable Windows 95-style application launcher.");
                 ui.add_space(6.0);
                 ui.label(RichText::new("Controls").strong());
                 ui.label("Single click: run a program");
-                ui.label("Right click: program menu");
+                ui.label("Right click: program menu, including Add to group");
                 ui.label("Drag one tile onto another: create a group");
+                ui.label("Edit > New group, or View > Group: pick programs for a group");
+                ui.label("Ctrl+F or File > Find program: search");
                 ui.label("Drag an EXE / LNK / URL file here: add it");
                 ui.label(format!(
                     "{}: show or hide the launcher",
@@ -1277,6 +1444,179 @@ impl Launcher95App {
             self.edit_id = None;
         }
     }
+
+    fn search_window(&mut self, ctx: &egui::Context) {
+        if !self.show_search {
+            return;
+        }
+        let mut open = true;
+        let mut launch_first = false;
+        let mut close = false;
+        let visible_count = self.filtered_entries().len();
+
+        egui::Window::new("Find Program")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.label("Search by name or path:");                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Program name or path"),
+                );
+                if self.focus_search {
+                    response.request_focus();
+                    self.focus_search = false;
+                }
+                if response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+                    launch_first = true;
+                }
+                if response.has_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+                    launch_first = true;
+                }
+
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{visible_count} matching program{}",
+                        plural(visible_count)
+                    ))
+                    .size(11.0)
+                    .color(Color32::from_gray(70)),
+                );
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Launch first").clicked() {
+                        launch_first = true;
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.search.clear();
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+                if ui.input(|input| input.key_pressed(Key::Escape)) {
+                    close = true;
+                }
+            });
+
+        if launch_first {
+            if let Some(entry) = self.filtered_entries().first().cloned() {
+                self.launch_entry(&entry);
+                close = true;
+            }
+        }
+        if close || !open {
+            self.show_search = false;
+        }
+    }
+
+    fn group_window(&mut self, ctx: &egui::Context) {        if !self.show_group_dialog {
+            return;
+        }
+        let mut open = true;
+        let mut create = false;
+        let mut cancel = false;
+
+        let entries: Vec<(String, String, String)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.name.clone(), entry.group.clone()))
+            .collect();
+
+        egui::Window::new("New Group")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.label("Group name:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.group_name)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("e.g. Office, Games, Audio"),
+                );
+                if self.focus_group_name {
+                    response.request_focus();
+                    self.focus_group_name = false;
+                }
+                if response.lost_focus()
+                    && ui.input(|input| input.key_pressed(Key::Enter))
+                    && !self.group_name.trim().is_empty()
+                {
+                    create = true;
+                }
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Programs in this group").strong());
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if entries.is_empty() {
+                            ui.label(
+                                RichText::new("No programs yet.")
+                                    .size(11.0)
+                                    .color(Color32::from_gray(80)),
+                            );
+                        }
+                        for (id, name, group) in &entries {
+                            let mut checked = self.group_members.contains(id);
+                            let label = if group.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{name}  [{group}]")
+                            };
+                            if ui.checkbox(&mut checked, label).changed() {
+                                if checked {
+                                    self.group_members.insert(id.clone());
+                                } else {
+                                    self.group_members.remove(id);
+                                }
+                            }
+                        }
+                    });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Select all").clicked() {
+                        for (id, _, _) in &entries {
+                            self.group_members.insert(id.clone());
+                        }
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.group_members.clear();
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_create =
+                        !self.group_name.trim().is_empty() && !self.group_members.is_empty();
+                    if ui
+                        .add_enabled(can_create, egui::Button::new("Create"))
+                        .clicked()
+                    {
+                        create = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                if ui.input(|input| input.key_pressed(Key::Escape)) {
+                    cancel = true;
+                }
+            });
+
+        if create {
+            self.create_group();
+        }
+        if cancel || !open {
+            self.show_group_dialog = false;
+        }
+    }
 }
 
 /// True while the left mouse button is physically held down anywhere.
@@ -1342,26 +1682,29 @@ impl eframe::App for Launcher95App {
         self.autosave();
 
         egui::TopBottomPanel::top("titlebar")
+            .exact_height(22.0)
             .frame(
                 Frame::new()
                     .fill(theme::NAVY)
-                    .inner_margin(Margin::symmetric(3, 3)),
+                    .inner_margin(Margin::symmetric(2, 2)),
             )
             .show(ctx, |ui| self.title_bar(ui, ctx));
 
         egui::TopBottomPanel::top("menubar")
+            .exact_height(22.0)
             .frame(
                 Frame::new()
                     .fill(theme::WIN95)
-                    .inner_margin(Margin::symmetric(2, 1)),
+                    .inner_margin(Margin::symmetric(4, 1)),
             )
             .show(ctx, |ui| self.menu_bar(ui));
 
         egui::TopBottomPanel::bottom("statusbar")
+            .exact_height(22.0)
             .frame(
                 Frame::new()
                     .fill(theme::WIN95)
-                    .inner_margin(Margin::symmetric(4, 2)),
+                    .inner_margin(Margin::symmetric(0, 0)),
             )
             .show(ctx, |ui| self.status_bar(ui));
 
@@ -1369,7 +1712,7 @@ impl eframe::App for Launcher95App {
             .frame(
                 Frame::new()
                     .fill(theme::WIN95)
-                    .inner_margin(Margin::symmetric(6, 6)),
+                    .inner_margin(Margin::symmetric(1, 1)),
             )
             .show(ctx, |ui| self.content(ui));
 
@@ -1381,6 +1724,12 @@ impl eframe::App for Launcher95App {
         }
         if self.edit_id.is_some() {
             self.rename_window(ctx);
+        }
+        if self.show_group_dialog {
+            self.group_window(ctx);
+        }
+        if self.show_search {
+            self.search_window(ctx);
         }
 
         // Classic raised window edge around the whole client area.
@@ -1480,8 +1829,82 @@ fn title_button(ui: &mut egui::Ui, kind: TitleButton) -> bool {
     response.clicked()
 }
 
-fn plural(count: usize) -> &'static str {
-    if count == 1 {
+/// Splits the icon panel into equal-width columns, capped so labels stay readable.
+fn grid_columns(width: f32, icon_size: f32) -> (usize, f32) {
+    let ideal_cell = icon_size + 103.0;
+    let columns = ((width / ideal_cell).floor() as usize).clamp(1, 8);
+    let cell_width = ideal_cell.min(width / columns as f32);
+    (columns, cell_width)
+}
+
+/// Draws the classic resize grip in the bottom-right corner of the status bar.
+fn draw_size_grip(painter: &egui::Painter, rect: egui::Rect) {
+    let light = theme::WIN95_LIGHT;
+    let dark = theme::WIN95_DARK;
+    let right = rect.right() - 3.0;
+    let bottom = rect.bottom() - 3.0;
+    for i in 0..3 {
+        let offset = i as f32 * 4.0;
+        painter.line_segment(
+            [
+                egui::pos2(right - offset - 3.0, bottom),
+                egui::pos2(right, bottom - offset - 3.0),
+            ],
+            Stroke::new(1.0_f32, dark),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(right - offset - 2.0, bottom),
+                egui::pos2(right, bottom - offset - 2.0),
+            ],
+            Stroke::new(1.0_f32, light),
+        );
+    }
+}
+
+/// Win95 selection marker: a 1px dotted rectangle around the icon label.
+fn dotted_rect(painter: &egui::Painter, rect: egui::Rect) {
+    let color = Color32::WHITE;
+    let step = 2.0;
+    let mut x = rect.left();
+    while x < rect.right() {
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.top()),
+                egui::pos2((x + 1.0).min(rect.right()), rect.top()),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.bottom()),
+                egui::pos2((x + 1.0).min(rect.right()), rect.bottom()),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+        x += step;
+    }
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), y),
+                egui::pos2(rect.left(), (y + 1.0).min(rect.bottom())),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.right(), y),
+                egui::pos2(rect.right(), (y + 1.0).min(rect.bottom())),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+        y += step;
+    }
+}
+
+fn plural(count: usize) -> &'static str {    if count == 1 {
         ""
     } else {
         "s"
@@ -1495,4 +1918,126 @@ fn truncate(text: &str, max_chars: usize) -> String {
     let mut shortened: String = text.chars().take(max_chars.saturating_sub(1)).collect();
     shortened.push('…');
     shortened
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::load_entries;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("launcher95-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn entry(id: &str, name: &str, group: &str) -> AppEntry {
+        AppEntry {
+            id: id.into(),
+            name: name.into(),
+            path: format!("C:/{id}.exe"),
+            group: group.into(),
+            source: EntrySource::Manual,
+        }
+    }
+
+    #[test]
+    fn grid_uses_mockup_column_count() {
+        // The reference mockup uses ~40px icons spread over 5 equal columns.
+        let (columns, cell) = grid_columns(810.0, 40.0);
+        assert_eq!(columns, 5);
+        assert!((cell - 143.0).abs() < 1.0, "cell was {cell}");
+
+        // Very narrow panes degrade to one column instead of producing zero.
+        let (columns, _) = grid_columns(90.0, 96.0);
+        assert_eq!(columns, 1);
+
+        // Wide panes stop at the cap.
+        let (columns, _) = grid_columns(4000.0, 32.0);
+        assert_eq!(columns, 8);
+    }
+
+    #[test]
+    fn search_window_shortcut_opens_find() {
+        let dir = temp_dir("search-key");
+        save_entries(&dir, &[entry("a", "Alpha", "")]).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Launcher95App::new_with_context(&ctx, dir.clone());
+
+        assert!(!app.show_search);
+        let mut input = egui::RawInput::default();
+        input.modifiers.ctrl = true;
+        input.events.push(egui::Event::Key {
+            key: Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        ctx.begin_pass(input);
+        app.handle_shortcuts(&ctx);
+        let _ = ctx.end_pass();
+
+        assert!(app.show_search, "Ctrl+F opens the find window");
+        assert!(app.focus_search, "the search box takes focus");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_group_moves_selected_entries_and_persists() {
+        let dir = temp_dir("group");
+        save_entries(
+            &dir,
+            &[
+                entry("a", "Alpha", ""),
+                entry("b", "Beta", "Old"),
+                entry("c", "Gamma", ""),
+            ],
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = Launcher95App::new_with_context(&ctx, dir.clone());
+
+        app.group_name = "  Office  ".to_owned();
+        app.group_members = ["a".to_owned(), "c".to_owned()].into_iter().collect();
+        app.show_group_dialog = true;
+        app.create_group();
+
+        assert!(!app.show_group_dialog, "dialog closes after creating a group");
+        assert_eq!(app.group_filter, "Office");
+        assert_eq!(app.entries[0].group, "Office");
+        assert_eq!(app.entries[1].group, "Old");
+        assert_eq!(app.entries[2].group, "Office");
+
+        let saved = load_entries(&dir);
+        assert_eq!(saved[0].group, "Office");
+        assert_eq!(saved[1].group, "Old");
+        assert_eq!(saved[2].group, "Office");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_group_needs_a_name_and_at_least_one_member() {
+        let dir = temp_dir("group-empty");
+        save_entries(&dir, &[entry("a", "Alpha", "")]).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Launcher95App::new_with_context(&ctx, dir.clone());
+
+        app.group_name = "   ".to_owned();
+        app.group_members = ["a".to_owned()].into_iter().collect();
+        app.create_group();
+        assert_eq!(app.entries[0].group, "", "blank group name is rejected");
+
+        app.group_name = "Office".to_owned();
+        app.group_members.clear();
+        app.create_group();
+        assert_eq!(app.entries[0].group, "", "empty member list is rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

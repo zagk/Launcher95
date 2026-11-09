@@ -7,7 +7,8 @@ global shortcut) away.
 ## Features
 
 - **Authentic Windows 95 look**: navy title bar, beveled buttons, Tahoma UI font,
-  classic menu bar, toolbar and status bar, drawn entirely in the app.
+  classic menu bar, a flat white icon panel and a status bar with a resize grip,
+  drawn entirely in the app.
 - **Real Windows icons**: icons come from the actual shell resources.
   - A dropped `.lnk` shortcut is resolved to its target, so the tile shows the
     icon of the program, not a generic shortcut glyph.
@@ -18,12 +19,14 @@ global shortcut) away.
     Store apps and documents fall back to the shell image lists
     (`SHGetImageList`, Jumbo/Extra large).
   - Results are cached in `Data/icons` and reused on later starts.
-- **Add programs** with File > Add programs, the `+ Add` toolbar button, or by
-  dragging EXE / LNK / URL files onto the window.
-- **Search** by name or path, with live filtering; press Enter in the search box
-  to launch the first match.
-- **Groups**: drag one tile onto another to put both into a named group, then
-  filter the grid by group.
+- **Add programs** with File > Add programs, `Ctrl+O`, or by dragging EXE / LNK /
+  URL files onto the window.
+- **Search** by name or path in a dedicated Find window (`Ctrl+F` or File > Find
+  program), with live match counts; press Enter to launch the first match.
+- **Groups**: drag one tile onto another to put both into a named group. You can also
+  use Edit > New group…, or right-click a tile and choose Add to group > New group…
+  to pick any set of programs at once. Filter the grid by group from View > Group;
+  the status bar shows the active group.
 - **Rename / remove** entries, or reveal them in Explorer. Removing never deletes
   the original file.
 - **Missing-file cleanup** (Edit > Remove missing files) to prune shortcuts whose
@@ -35,9 +38,13 @@ global shortcut) away.
   taskbar automatically (configurable in Settings).
 - **Single instance**: launching `launcher95.exe` again restores and focuses the
   running copy instead of opening a second window.
-- **Settings**: icon size (32/48/64/96), name visibility, name sorting,
-  always-on-top, minimize-on-blur, remembered window position, and a configurable
-  hotkey.
+- **Opens at the mouse pointer**: on startup the window is centered on the cursor
+  and clamped to the monitor's work area, so the launcher appears where you are
+  working (configurable in Settings; falls back to the remembered position when
+  disabled).
+- **Settings**: icon size (32/40/64/96), name visibility, name sorting,
+  always-on-top, minimize-on-blur, open-at-mouse-pointer, remembered window
+  position, and a configurable hotkey.
 - **Portable data**: everything lives in a `Data` folder next to the executable.
   If that folder is not writable (e.g. Program Files), it falls back to
   `%LOCALAPPDATA%\Launcher95`.
@@ -47,13 +54,16 @@ global shortcut) away.
 | Action | Input |
 | --- | --- |
 | Show / hide launcher | `Alt+Space` (configurable) |
-| Focus search | `Ctrl+F` |
-| Add programs | `Ctrl+O` |
-| Launch first search match | `Enter` in the search box |
+| Find a program | `Ctrl+F`, or File > Find program |
+| Add programs | `Ctrl+O`, or File > Add programs |
+| Launch first search match | `Enter` in the Find window |
 | Clear search / close dialog | `Esc` |
 | Launch an app | Click a tile |
 | Tile context menu | Right-click a tile |
 | Put two apps in a group | Drag one tile onto another |
+| Create a group of several apps | Edit > New group…, or tile menu > Add to group |
+| Filter by group | View > Group |
+| Open at the mouse pointer | Enabled by default; toggle in Settings |
 | Move window | Drag the title bar |
 | Maximize / restore | Double-click the title bar, or the middle title button |
 | Minimize | Click outside the window, or the left title button |
